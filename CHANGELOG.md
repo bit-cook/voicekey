@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.8](https://github.com/BuildWithAIs/voicekey/compare/v0.1.7...v0.1.8) (2026-03-12)
+
+### Features
+
+- **audio:** add low-volume enhancement mode ([2aae04d](https://github.com/BuildWithAIs/voicekey/commit/2aae04d07e266ba3b1dc00b21499164f3b51ea97))
+- **llm:** add glm refine mvp with asr reuse ([6b094cd](https://github.com/BuildWithAIs/voicekey/commit/6b094cd03774fcdb6fbb96bc0a0aab86f1cf7d0a))
+- **test:** add testing infrastructure with Vitest and Playwright ([4d4249d](https://github.com/BuildWithAIs/voicekey/commit/4d4249d011343ca960d31191c62132cc2096c018))
+- **website:** add automatic version detection from GitHub releases ([b6c756b](https://github.com/BuildWithAIs/voicekey/commit/b6c756b2aa971cf3b60b8a94364a1cdf3b536427))
+
+### Bug Fixes
+
+- **website:** add localStorage caching to reduce GitHub API calls ([41cdf6d](https://github.com/BuildWithAIs/voicekey/commit/41cdf6d43d914dcaf874db867be4ebec18bfc4f2))
+
 ### [0.1.7](https://github.com/BuildWithAIs/voicekey/compare/v0.1.6...v0.1.7) (2026-01-26)
 
 ### Features
