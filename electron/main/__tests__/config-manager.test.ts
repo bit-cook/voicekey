@@ -3,6 +3,14 @@ import { DEFAULT_HOTKEYS, LLM_REFINE } from '../../shared/constants'
 
 type StoreData = Record<string, unknown>
 
+vi.mock('electron', () => ({
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (text: string) => Buffer.from(`encrypted:${text}`),
+    decryptString: (buffer: Buffer) => buffer.toString().replace('encrypted:', ''),
+  },
+}))
+
 const getByPath = (data: StoreData, key: string): unknown => {
   return key.split('.').reduce<unknown>((current, part) => {
     if (!current || typeof current !== 'object') return undefined

@@ -119,6 +119,7 @@ vi.mock('../config-manager', () => ({
     getAppConfig: mockGetAppConfig,
     getASRConfig: mockGetASRConfig,
     getLLMRefineConfig: mockGetLLMRefineConfig,
+    migrateApiKeysEncryption: vi.fn(),
   },
 }))
 

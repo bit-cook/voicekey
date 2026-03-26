@@ -109,13 +109,11 @@ export class ConfigManager {
     ) {
       this.store.set('asr.lowVolumeMode', false)
     }
-
-    // API Key 加密迁移：将明文 key 加密存储
-    this.migrateApiKeysEncryption()
   }
 
   // 将未加密的 API Key 迁移为加密存储
-  private migrateApiKeysEncryption(): void {
+  // 必须在 app.whenReady() 之后调用，因为 safeStorage 在 Windows/Linux 上需要 ready 事件
+  migrateApiKeysEncryption(): void {
     if (!safeStorage.isEncryptionAvailable()) return
 
     const apiKeys = this.store.get('asr.apiKeys', { cn: '', intl: '' })

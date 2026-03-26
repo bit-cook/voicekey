@@ -91,6 +91,7 @@ app.whenReady().then(async () => {
   }
 
   // 初始化
+  configManager.migrateApiKeysEncryption()
   const appConfig = configManager.getAppConfig()
   await initMainI18n(appConfig.language)
 
