@@ -51,8 +51,7 @@ const defaultConfig: AppConfig = {
 function normalizeLLMRefineConfig(config?: Partial<LLMRefineConfig>): LLMRefineConfig {
   return {
     ...defaultLLMRefineConfig,
-    enabled:
-      typeof config?.enabled === 'boolean' ? config.enabled : defaultLLMRefineConfig.enabled,
+    enabled: typeof config?.enabled === 'boolean' ? config.enabled : defaultLLMRefineConfig.enabled,
     endpoint: config?.endpoint ?? defaultLLMRefineConfig.endpoint,
     model: config?.model ?? defaultLLMRefineConfig.model,
     apiKey: config?.apiKey ?? defaultLLMRefineConfig.apiKey,

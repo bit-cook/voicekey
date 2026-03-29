@@ -44,7 +44,7 @@ import {
   // Session Manager
   handleStartRecording,
   handleStopRecording,
-  handleAudioData,
+  handleAudioChunk,
   handleCancelSession,
   getCurrentSession,
   setSessionError,
@@ -176,7 +176,7 @@ app.whenReady().then(async () => {
       // 这些现在直接从 audio/ 模块导入
       handleStartRecording,
       handleStopRecording,
-      handleAudioData,
+      handleAudioChunk,
       handleCancelSession,
       getCurrentSession,
     },

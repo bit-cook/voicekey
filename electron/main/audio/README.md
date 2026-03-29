@@ -1,11 +1,19 @@
 # audio/
 
-主进程音频处理模块，负责录音会话状态与音频处理流水线。
+Main-process audio pipeline for recording sessions and chunked transcription.
 
-## 文件
+## Files
 
-- `index.ts` - 音频模块统一导出。
-- `session-manager.ts` - 会话生命周期管理（开始/停止/取消）与 HUD 状态更新。
-- `processor.ts` - 音频处理流水线（保存、按低音量模式选择增益转码、ASR、文本润色、写历史、注入、清理，润色失败时回退原文）。
-- `converter.ts` - FFmpeg 初始化与 WebM → MP3 转换（支持可选 `gainDb` 音量增强）。
-- `__tests__/` - 音频会话与处理流水线测试。
+- `index.ts` - Re-exports the audio module surface.
+- `session-manager.ts` - Owns the active recording session lifecycle, `sessionId`, and HUD state transitions.
+- `processor.ts` - Accepts audio chunks, writes temp files, converts to MP3, calls GLM ASR, merges chunk text in order, and runs the final refine/history/inject step once.
+- `converter.ts` - Initializes FFmpeg and converts captured audio to the upload format, with optional low-volume gain.
+- `__tests__/` - Coverage for session lifecycle, chunk processing, and conversion helpers.
+
+## Current Flow
+
+1. The renderer records one session for up to 3 minutes and rotates internal chunks every 29 seconds.
+2. The main process tracks chunk work by `sessionId + chunkIndex` and can process chunk ASR requests out of order.
+3. Finalization only runs after the final chunk has been seen and every chunk from `0..finalChunkIndex` has produced text.
+4. Refinement, history writes, and text injection happen once per session after the merged transcript is ready.
+5. Any chunk failure or session cancellation aborts the session and discards late results.

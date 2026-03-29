@@ -118,6 +118,18 @@ describe('ASRProvider', () => {
     expect(mockFormDataAppend).toHaveBeenCalledWith('language', 'en')
   })
 
+  it('adds prompt when provided', async () => {
+    const provider = await createProvider()
+    await provider.transcribe('/tmp/audio.mp3', { prompt: 'previous text' })
+    expect(mockFormDataAppend).toHaveBeenCalledWith('prompt', 'previous text')
+  })
+
+  it('adds request_id when provided', async () => {
+    const provider = await createProvider()
+    await provider.transcribe('/tmp/audio.mp3', { requestId: 'session-1-chunk-0' })
+    expect(mockFormDataAppend).toHaveBeenCalledWith('request_id', 'session-1-chunk-0')
+  })
+
   it('throws on invalid response payload', async () => {
     mockPost.mockResolvedValueOnce({ data: {} })
     const provider = await createProvider()

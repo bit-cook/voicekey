@@ -48,7 +48,12 @@ describe('session-manager', () => {
     await handleStartRecording()
 
     expect(mockShowOverlay).toHaveBeenCalledWith({ status: 'recording' })
-    expect(window.webContents.send).toHaveBeenCalledWith(IPC_CHANNELS.SESSION_START)
+    expect(window.webContents.send).toHaveBeenCalledWith(
+      IPC_CHANNELS.SESSION_START,
+      expect.objectContaining({
+        sessionId: expect.any(String),
+      }),
+    )
     expect(getCurrentSession()?.status).toBe('recording')
   })
 

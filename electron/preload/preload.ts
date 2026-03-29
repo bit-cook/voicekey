@@ -11,6 +11,8 @@ import {
   type LanguageSnapshot,
   type LLMRefineConfig,
   type RefineConnectionResult,
+  type RecordingStartPayload,
+  type AudioChunkPayload,
 } from '../shared/types'
 
 // 定义暴露给渲染进程的API接口
@@ -45,9 +47,9 @@ export interface ElectronAPI {
   onTranscription: (callback: (text: string) => void) => () => void
   onError: (callback: (error: string) => void) => () => void
 
-  onStartRecording: (callback: () => void) => () => void
+  onStartRecording: (callback: (payload: RecordingStartPayload) => void) => () => void
   onStopRecording: (callback: () => void) => () => void
-  sendAudioData: (buffer: ArrayBuffer) => void
+  sendAudioChunk: (payload: AudioChunkPayload) => void
   sendError: (error: string) => void
   sendAudioLevel: (level: number) => void
 
@@ -124,10 +126,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // [NEW] Audio Recording (Main -> Renderer)
-  onStartRecording: (callback: () => void) => {
-    const listener = () => {
+  onStartRecording: (callback: (payload: RecordingStartPayload) => void) => {
+    const listener = (_event: IpcRendererEvent, payload: RecordingStartPayload) => {
       console.log('[Preload] Received SESSION_START')
-      callback()
+      callback(payload)
     }
     ipcRenderer.on(IPC_CHANNELS.SESSION_START, listener)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.SESSION_START, listener)
@@ -141,8 +143,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.SESSION_STOP, listener)
   },
 
-  sendAudioData: (buffer: ArrayBuffer) => {
-    ipcRenderer.send('audio:data', buffer)
+  sendAudioChunk: (payload: AudioChunkPayload) => {
+    ipcRenderer.send(IPC_CHANNELS.AUDIO_DATA, payload)
   },
   sendError: (error: string) => {
     ipcRenderer.send('error', error)

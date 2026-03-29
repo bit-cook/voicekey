@@ -184,7 +184,7 @@ vi.mock('../ipc', () => ({
 vi.mock('../audio', () => ({
   handleStartRecording: vi.fn(),
   handleStopRecording: vi.fn(),
-  handleAudioData: vi.fn(),
+  handleAudioChunk: vi.fn(),
   handleCancelSession: vi.fn(),
   getCurrentSession: vi.fn(() => null),
   setSessionError: vi.fn(),

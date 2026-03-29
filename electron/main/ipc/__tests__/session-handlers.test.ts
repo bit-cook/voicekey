@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { IPC_CHANNELS } from '@electron/shared/types'
+import { IPC_CHANNELS, type AudioChunkPayload } from '@electron/shared/types'
 
 type IpcHandler = (event: unknown, ...args: unknown[]) => unknown
 type IpcListener = (event: unknown, ...args: unknown[]) => void
@@ -22,6 +22,17 @@ const setupModuleMocks = (ipcMain: unknown) => {
   vi.doMock('electron', () => ({ ipcMain }))
 }
 
+const createChunkPayload = (): AudioChunkPayload => {
+  const audioBuffer = new Uint8Array([1, 2, 3]).buffer
+  return {
+    sessionId: 'session-1',
+    chunkIndex: 0,
+    isFinal: true,
+    mimeType: 'audio/webm',
+    buffer: audioBuffer,
+  }
+}
+
 describe('session-handlers', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -36,7 +47,7 @@ describe('session-handlers', () => {
     const deps = {
       handleStartRecording: vi.fn().mockResolvedValue(undefined),
       handleStopRecording: vi.fn().mockResolvedValue(undefined),
-      handleAudioData: vi.fn().mockResolvedValue(undefined),
+      handleAudioChunk: vi.fn().mockResolvedValue(undefined),
       handleCancelSession: vi.fn().mockResolvedValue(undefined),
       getCurrentSession: vi.fn(() => ({ status: 'recording' })),
     }
@@ -55,52 +66,50 @@ describe('session-handlers', () => {
     expect(deps.handleCancelSession).toHaveBeenCalled()
   })
 
-  it('converts audio payload to Buffer and forwards it', async () => {
+  it('forwards audio chunk payloads to the processor', async () => {
     const { ipcMain, listeners } = createIpcMain()
     setupModuleMocks(ipcMain)
     const { initSessionHandlers, registerSessionHandlers } = await import('../session-handlers')
 
-    const handleAudioData = vi.fn().mockResolvedValue(undefined)
+    const handleAudioChunk = vi.fn().mockResolvedValue(undefined)
     initSessionHandlers({
       handleStartRecording: vi.fn(),
       handleStopRecording: vi.fn(),
-      handleAudioData,
+      handleAudioChunk,
       handleCancelSession: vi.fn(),
       getCurrentSession: vi.fn(() => null),
     })
     registerSessionHandlers()
 
-    const payload = new Uint8Array([1, 2, 3]).buffer
+    const payload = createChunkPayload()
     listeners.get(IPC_CHANNELS.AUDIO_DATA)?.(null, payload)
     await new Promise((resolve) => setImmediate(resolve))
 
-    expect(handleAudioData).toHaveBeenCalledTimes(1)
-    const arg = handleAudioData.mock.calls[0]?.[0]
-    expect(Buffer.isBuffer(arg)).toBe(true)
-    expect(arg).toEqual(Buffer.from(payload))
+    expect(handleAudioChunk).toHaveBeenCalledTimes(1)
+    expect(handleAudioChunk).toHaveBeenCalledWith(payload)
   })
 
-  it('logs error when audio processing fails', async () => {
+  it('logs error when audio chunk processing fails', async () => {
     const { ipcMain, listeners } = createIpcMain()
     setupModuleMocks(ipcMain)
     const { initSessionHandlers, registerSessionHandlers } = await import('../session-handlers')
 
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const handleAudioData = vi.fn().mockRejectedValue(new Error('fail'))
+    const handleAudioChunk = vi.fn().mockRejectedValue(new Error('fail'))
     initSessionHandlers({
       handleStartRecording: vi.fn(),
       handleStopRecording: vi.fn(),
-      handleAudioData,
+      handleAudioChunk,
       handleCancelSession: vi.fn(),
       getCurrentSession: vi.fn(() => null),
     })
     registerSessionHandlers()
 
-    listeners.get(IPC_CHANNELS.AUDIO_DATA)?.(null, new Uint8Array([9]).buffer)
+    listeners.get(IPC_CHANNELS.AUDIO_DATA)?.(null, createChunkPayload())
     await new Promise((resolve) => setImmediate(resolve))
 
     expect(consoleError).toHaveBeenCalledWith(
-      '[IPC:Session] Audio data processing failed:',
+      '[IPC:Session] Audio chunk processing failed:',
       expect.any(Error),
     )
     consoleError.mockRestore()

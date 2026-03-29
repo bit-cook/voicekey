@@ -1,4 +1,12 @@
 import { useEffect, useRef } from 'react'
+import { GLM_ASR } from '@electron/shared/constants'
+import type { RecordingStartPayload } from '@electron/shared/types'
+
+type StopMeta = {
+  chunkIndex: number
+  isFinal: boolean
+  rotateAfterStop: boolean
+}
 
 export function AudioRecorder() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -7,139 +15,254 @@ export function AudioRecorder() {
   const chunksRef = useRef<Blob[]>([])
   const analyserRef = useRef<AnalyserNode | null>(null)
   const animationFrameRef = useRef<number | null>(null)
-  const isRecordingRef = useRef(false) // 录音状态守卫
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sessionMaxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stopMetaRef = useRef<StopMeta | null>(null)
+  const currentSessionIdRef = useRef<string | null>(null)
+  const currentChunkIndexRef = useRef(0)
+  const currentMimeTypeRef = useRef('audio/webm')
+  const isRecordingRef = useRef(false)
+  const isSessionEndingRef = useRef(false)
 
-  // 统一的资源释放函数
-  const releaseResources = () => {
-    // 新增：防止重复调用
-    if (!isRecordingRef.current && !streamRef.current && !audioContextRef.current) {
-      return // 资源已释放，跳过
+  const clearChunkTimer = () => {
+    if (chunkTimerRef.current) {
+      clearTimeout(chunkTimerRef.current)
+      chunkTimerRef.current = null
     }
-    // 立即标记为非录音状态，防止并发调用
-    isRecordingRef.current = false
-    // 停止动画帧
+  }
+
+  const clearSessionMaxTimer = () => {
+    if (sessionMaxTimerRef.current) {
+      clearTimeout(sessionMaxTimerRef.current)
+      sessionMaxTimerRef.current = null
+    }
+  }
+
+  const releaseResources = () => {
+    clearChunkTimer()
+    clearSessionMaxTimer()
+
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current)
       animationFrameRef.current = null
     }
 
-    // 关闭 AudioContext
     if (audioContextRef.current) {
-      audioContextRef.current.close()
+      void audioContextRef.current.close()
       audioContextRef.current = null
     }
 
-    // 释放麦克风流
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => {
-        console.log(`[Renderer] Releasing track: ${track.kind}, readyState: ${track.readyState}`)
-        track.stop()
-        console.log(`[Renderer] Track released, new readyState: ${track.readyState}`)
-      })
+      streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
     }
 
     analyserRef.current = null
     mediaRecorderRef.current = null
-    chunksRef.current = [] // 新增：防止内存泄漏和数据污染
+    chunksRef.current = []
+    stopMetaRef.current = null
+    currentSessionIdRef.current = null
+    currentChunkIndexRef.current = 0
+    currentMimeTypeRef.current = 'audio/webm'
     isRecordingRef.current = false
+    isSessionEndingRef.current = false
+  }
+
+  const sendAudioLevel = () => {
+    const analyser = analyserRef.current
+    if (!analyser) return
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount)
+    analyser.getByteFrequencyData(dataArray)
+    const sum = dataArray.reduce((a, b) => a + b, 0)
+    const average = sum / dataArray.length
+    const normalized = Math.min(average / 128, 1)
+    window.electronAPI.sendAudioLevel(normalized)
+    animationFrameRef.current = requestAnimationFrame(sendAudioLevel)
+  }
+
+  const handleRecorderStop = async () => {
+    const sessionId = currentSessionIdRef.current
+    const mimeType = currentMimeTypeRef.current
+    const stopMeta = stopMetaRef.current ?? {
+      chunkIndex: currentChunkIndexRef.current,
+      isFinal: isSessionEndingRef.current,
+      rotateAfterStop: !isSessionEndingRef.current,
+    }
+    stopMetaRef.current = null
+
+    const blob = new Blob(chunksRef.current, { type: mimeType })
+    chunksRef.current = []
+
+    if (sessionId && blob.size > 0) {
+      const buffer = await blob.arrayBuffer()
+      window.electronAPI.sendAudioChunk({
+        sessionId,
+        chunkIndex: stopMeta.chunkIndex,
+        isFinal: stopMeta.isFinal,
+        mimeType,
+        buffer,
+      })
+    } else {
+      console.warn('[Renderer] Skipping empty audio chunk')
+    }
+
+    if (stopMeta.isFinal || isSessionEndingRef.current) {
+      releaseResources()
+      console.log('[Renderer] Final chunk sent, resources released')
+      return
+    }
+
+    currentChunkIndexRef.current = stopMeta.chunkIndex + 1
+    startChunkRecorder()
+  }
+
+  const requestRecorderStop = (nextStopMeta: StopMeta) => {
+    if (nextStopMeta.isFinal) {
+      isSessionEndingRef.current = true
+    }
+
+    const existingStopMeta = stopMetaRef.current
+    if (existingStopMeta) {
+      if (nextStopMeta.isFinal) {
+        existingStopMeta.isFinal = true
+        existingStopMeta.rotateAfterStop = false
+      }
+      return
+    }
+
+    const recorder = mediaRecorderRef.current
+    if (!recorder) {
+      if (nextStopMeta.isFinal) {
+        releaseResources()
+      }
+      return
+    }
+
+    clearChunkTimer()
+    stopMetaRef.current = {
+      chunkIndex: nextStopMeta.chunkIndex,
+      isFinal: nextStopMeta.isFinal,
+      rotateAfterStop: nextStopMeta.rotateAfterStop && !nextStopMeta.isFinal,
+    }
+
+    if (recorder.state !== 'inactive') {
+      recorder.stop()
+    }
+  }
+
+  const scheduleChunkRotation = () => {
+    clearChunkTimer()
+    chunkTimerRef.current = setTimeout(() => {
+      if (!isSessionEndingRef.current) {
+        requestRecorderStop({
+          chunkIndex: currentChunkIndexRef.current,
+          isFinal: false,
+          rotateAfterStop: true,
+        })
+      }
+    }, GLM_ASR.REQUEST_MAX_DURATION_SECONDS * 1000)
+  }
+
+  const startChunkRecorder = () => {
+    const stream = streamRef.current
+    if (!stream) return
+
+    const mediaRecorder = new MediaRecorder(stream, { mimeType: currentMimeTypeRef.current })
+    mediaRecorderRef.current = mediaRecorder
+    chunksRef.current = []
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunksRef.current.push(event.data)
+      }
+    }
+
+    mediaRecorder.onstop = () => {
+      void handleRecorderStop()
+    }
+
+    mediaRecorder.onerror = (event) => {
+      console.error('[Renderer] MediaRecorder error:', event)
+      window.electronAPI.sendError(`MediaRecorder error: ${event}`)
+      releaseResources()
+    }
+
+    mediaRecorder.start()
+    scheduleChunkRotation()
+    console.log(`[Renderer] Recording chunk ${currentChunkIndexRef.current} started`)
+  }
+
+  const startRecordingSession = async (payload: RecordingStartPayload) => {
+    if (isRecordingRef.current) {
+      console.warn('[Renderer] Already recording, ignoring start request')
+      return
+    }
+
+    try {
+      releaseResources()
+
+      currentSessionIdRef.current = payload.sessionId
+      currentChunkIndexRef.current = 0
+      isRecordingRef.current = true
+      isSessionEndingRef.current = false
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      const audioContext = new AudioContext()
+      audioContextRef.current = audioContext
+
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.3
+      source.connect(analyser)
+      analyserRef.current = analyser
+
+      sendAudioLevel()
+
+      let mimeType = 'audio/wav'
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = 'audio/webm'
+      }
+      currentMimeTypeRef.current = mimeType
+
+      startChunkRecorder()
+
+      sessionMaxTimerRef.current = setTimeout(() => {
+        if (!isSessionEndingRef.current && currentSessionIdRef.current === payload.sessionId) {
+          void window.electronAPI.stopSession()
+        }
+      }, GLM_ASR.SESSION_MAX_DURATION_SECONDS * 1000)
+    } catch (error) {
+      console.error('[Renderer] Failed to start recording:', error)
+      window.electronAPI.sendError(`Failed to access microphone: ${error}`)
+      releaseResources()
+    }
+  }
+
+  const stopRecordingSession = () => {
+    console.log('[Renderer] onStopRecording triggered')
+    requestRecorderStop({
+      chunkIndex: currentChunkIndexRef.current,
+      isFinal: true,
+      rotateAfterStop: false,
+    })
   }
 
   useEffect(() => {
-    window.electronAPI.onStartRecording(async () => {
-      // 录音状态守卫：防止重复录音
-      if (isRecordingRef.current) {
-        console.warn('[Renderer] Already recording, ignoring start request')
-        return
-      }
-
-      try {
-        // 确保之前的录音已清理
-        releaseResources()
-
-        isRecordingRef.current = true
-
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        streamRef.current = stream // 保存引用
-
-        const audioContext = new AudioContext()
-        audioContextRef.current = audioContext // 保存引用
-
-        const source = audioContext.createMediaStreamSource(stream)
-        const analyser = audioContext.createAnalyser()
-        analyser.fftSize = 256
-        analyser.smoothingTimeConstant = 0.3
-        source.connect(analyser)
-        analyserRef.current = analyser
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount)
-
-        const sendAudioLevel = () => {
-          if (!analyserRef.current) return
-          analyserRef.current.getByteFrequencyData(dataArray)
-          const sum = dataArray.reduce((a, b) => a + b, 0)
-          const average = sum / dataArray.length
-          const normalized = Math.min(average / 128, 1)
-          window.electronAPI.sendAudioLevel(normalized)
-          animationFrameRef.current = requestAnimationFrame(sendAudioLevel)
-        }
-        sendAudioLevel()
-
-        let mimeType = 'audio/wav'
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-          mimeType = 'audio/webm'
-        }
-
-        const mediaRecorder = new MediaRecorder(stream, { mimeType })
-        mediaRecorderRef.current = mediaRecorder
-        chunksRef.current = []
-
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) {
-            chunksRef.current.push(e.data)
-          }
-        }
-
-        mediaRecorder.onstop = async () => {
-          // 处理音频数据
-          const blob = new Blob(chunksRef.current, { type: mimeType })
-          const buffer = await blob.arrayBuffer()
-          window.electronAPI.sendAudioData(buffer)
-
-          // 释放所有资源
-          releaseResources()
-          console.log('[Renderer] Recording stopped, resources released')
-        }
-
-        mediaRecorder.onerror = (e) => {
-          console.error('[Renderer] MediaRecorder error:', e)
-          window.electronAPI.sendError(`MediaRecorder error: ${e}`)
-          // 错误时也释放资源
-          releaseResources()
-        }
-
-        console.log('[Renderer] Recording started')
-        mediaRecorder.start()
-      } catch (err) {
-        console.error('[Renderer] Failed to start recording:', err)
-        window.electronAPI.sendError(`Failed to access microphone: ${err}`)
-        // 启动失败也要释放
-        releaseResources()
-      }
+    const removeStartRecordingListener = window.electronAPI.onStartRecording((payload) => {
+      void startRecordingSession(payload)
     })
 
-    window.electronAPI.onStopRecording(() => {
-      console.log('[Renderer] onStopRecording triggered')
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop()
-      } else {
-        // 如果没有活跃的录音，也尝试释放资源（兜底）
-        releaseResources()
-      }
+    const removeStopRecordingListener = window.electronAPI.onStopRecording(() => {
+      stopRecordingSession()
     })
 
-    // 组件卸载时清理
     return () => {
+      removeStartRecordingListener?.()
+      removeStopRecordingListener?.()
       releaseResources()
       console.log('[Renderer] Component unmounted, resources released')
     }

@@ -1,64 +1,27 @@
 # preload/
 
-Electron 预加载脚本目录，作为主进程和渲染进程之间的安全桥梁。
+Electron 预加载脚本目录，作为主进程与渲染进程之间的安全桥梁。
 
 ## 文件列表
 
 ### `preload.ts`
 
-IPC 通信桥接脚本，运行在渲染进程上下文但可访问部分 Node.js API：
+通过 `contextBridge` 暴露 `window.electronAPI`，封装配置、录音、历史、日志与更新相关 IPC。
 
-#### 功能职责
+## 录音相关 API
 
-- **contextBridge** - 安全地暴露 `window.electronAPI` 给渲染进程
-- **IPC 封装** - 封装 `ipcRenderer.invoke` 和 `ipcRenderer.on` 调用
-- **类型定义** - 导出 `ElectronAPI` 接口供渲染进程 TypeScript 使用
+- `onStartRecording(callback)` - 监听录音开始事件，并下发当前 `sessionId`。
+- `onStopRecording(callback)` - 监听录音停止事件。
+- `sendAudioChunk(payload)` - 发送单个录音 chunk；包含 `sessionId`、`chunkIndex`、`isFinal`、`mimeType` 与 `buffer`。
+- `sendAudioLevel(level)` - 向 HUD 同步实时音量。
+- `sendError(error)` - 上报渲染进程录音错误。
+- `cancelSession()` - 取消当前会话。
 
-#### 暴露的 API
+## 其他 API
 
-**配置管理**
-
-- `getConfig()` - 获取完整应用配置
-- `setConfig(config)` - 保存配置
-- `testConnection(config)` - 测试 ASR API 连接
-- `testRefineConnection(config)` - 测试当前文本润色配置的 OpenAI-compatible 连接
-- `getAppLanguage()` - 获取主进程语言快照（setting/resolved/locale）
-- `onAppLanguageChanged(callback)` - 监听主进程语言变更广播
-
-**录音会话**
-
-- `onStartRecording(callback)` - 监听录音开始信号（主进程 → 渲染）
-- `onStopRecording(callback)` - 监听录音停止信号（主进程 → 渲染）
-- `sendAudioData(buffer)` - 发送录制的音频数据（渲染 → 主进程）
-- `sendError(error)` - 发送错误信息
-- `cancelSession()` - 取消当前会话并停止录音
-
-**快捷键**
-
-- `registerHotkey(accelerator)` - 注册全局快捷键
-- `unregisterHotkey(accelerator)` - 注销快捷键
-
-**事件监听**
-
-- `onSessionStatus(callback)` - 会话状态变化
-- `onTranscription(callback)` - 转录结果返回
-- `onError(callback)` - 错误通知
-
-**系统信息**
-
-- `platform` - 当前操作系统平台（darwin/win32/linux）
-- `checkForUpdates()` - 请求 GitHub Releases 最新版本信息
-- `getUpdateStatus()` - 获取启动时自动检查的缓存结果（如果有）
-- `openExternal(url)` - 打开外部链接（用于发布页）
-
-**日志**
-
-- `getLogTail(options)` - 获取日志尾部文本（可限制读取字节数）
-- `openLogFolder()` - 打开日志目录
-- `log(entry)` - 渲染进程发送日志到主进程（带 level/message）
-
-#### 安全机制
-
-- 使用 `contextBridge` 避免直接暴露 Node.js 能力
-- 所有 IPC 调用基于预定义的 `IPC_CHANNELS` 常量
-- 禁用 `nodeIntegration`，启用 `contextIsolation`
+- `getConfig()` / `setConfig()` - 读取和保存应用配置。
+- `testConnection(config)` - 测试 ASR 连接。
+- `testRefineConnection(config)` - 测试文本润色连接。
+- `getHistory()` / `clearHistory()` / `deleteHistoryItem(id)` - 管理转录历史。
+- `checkForUpdates()` / `getUpdateStatus()` / `openExternal(url)` - 更新相关接口。
+- `getLogTail(options)` / `openLogFolder()` / `log(entry)` - 日志相关接口。

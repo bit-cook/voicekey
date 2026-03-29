@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Buffer } from 'node:buffer'
+import type { AudioChunkPayload } from '@electron/shared/types'
 
 const mockUpdateOverlay = vi.fn()
 const mockHideOverlay = vi.fn()
@@ -9,6 +10,7 @@ const mockConvertToMP3 = vi.fn()
 const mockGetCurrentSession = vi.fn()
 const mockUpdateSession = vi.fn()
 const mockClearSession = vi.fn()
+const mockGetBackgroundWindow = vi.fn()
 
 vi.mock('electron', () => ({
   app: {
@@ -21,7 +23,7 @@ vi.mock('fs', async (importOriginal) => {
   const fsMock = {
     ...actual,
     writeFileSync: vi.fn(),
-    existsSync: vi.fn(),
+    existsSync: vi.fn(() => true),
     unlinkSync: vi.fn(),
   }
   return {
@@ -33,6 +35,10 @@ vi.mock('fs', async (importOriginal) => {
 vi.mock('../../window/overlay', () => ({
   updateOverlay: mockUpdateOverlay,
   hideOverlay: mockHideOverlay,
+}))
+
+vi.mock('../../window/background', () => ({
+  getBackgroundWindow: mockGetBackgroundWindow,
 }))
 
 vi.mock('../../i18n', () => ({
@@ -63,38 +69,77 @@ vi.mock('../session-manager', () => ({
 
 const loadProcessor = async () => {
   const module = await import('../processor')
+  module.__testUtils.resetChunkSessions()
   return module
+}
+
+const createChunk = (overrides: Partial<AudioChunkPayload> = {}): AudioChunkPayload => {
+  const audioBuffer = Buffer.from('audio')
+
+  return {
+    sessionId: 'session-1',
+    chunkIndex: 0,
+    isFinal: true,
+    mimeType: 'audio/webm',
+    buffer: audioBuffer.buffer.slice(
+      audioBuffer.byteOffset,
+      audioBuffer.byteOffset + audioBuffer.byteLength,
+    ),
+    ...overrides,
+  }
+}
+
+const createSession = (overrides: Record<string, unknown> = {}) => ({
+  id: 'session-1',
+  startTime: new Date(),
+  status: 'processing',
+  duration: 1200,
+  ...overrides,
+})
+
+const createDeferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 describe('audio processor', () => {
   beforeEach(() => {
+    vi.resetModules()
     vi.clearAllMocks()
     mockConvertToMP3.mockResolvedValue(undefined)
     mockGetCurrentSession.mockReturnValue(null)
+    mockGetBackgroundWindow.mockReturnValue({
+      webContents: {
+        send: vi.fn(),
+      },
+    })
   })
 
-  it('returns early when there is no active session', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
+  it('returns early when session is inactive', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    const transcribe = vi.fn()
+
     initProcessor({
-      getAsrProvider: () => null,
+      getAsrProvider: () => ({ transcribe }) as any,
       getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
       initializeASRProvider: vi.fn(),
     })
 
-    await handleAudioData(Buffer.from('test'))
+    await handleAudioChunk(createChunk())
 
     expect(mockConvertToMP3).not.toHaveBeenCalled()
+    expect(transcribe).not.toHaveBeenCalled()
     expect(mockHistoryAdd).not.toHaveBeenCalled()
   })
 
-  it('processes audio data end-to-end', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-      duration: 1200,
-    }
+  it('processes a single final chunk end-to-end', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    const session = createSession()
     mockGetCurrentSession.mockReturnValue(session)
 
     const transcribe = vi.fn().mockResolvedValue({
@@ -103,9 +148,9 @@ describe('audio processor', () => {
       created: Date.now(),
       model: 'glm',
     })
-    const getAsrProvider = vi.fn(() => ({ transcribe }) as any)
+
     initProcessor({
-      getAsrProvider,
+      getAsrProvider: () => ({ transcribe }) as any,
       getASRConfig: () => ({
         provider: 'glm',
         region: 'cn',
@@ -115,9 +160,8 @@ describe('audio processor', () => {
       initializeASRProvider: vi.fn(),
     })
 
-    const buffer = Buffer.from('audio')
     vi.useFakeTimers()
-    const promise = handleAudioData(buffer)
+    const promise = handleAudioChunk(createChunk())
     await promise
     await vi.runAllTimersAsync()
     vi.useRealTimers()
@@ -125,7 +169,13 @@ describe('audio processor', () => {
     expect(mockConvertToMP3).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
       gainDb: 10,
     })
-    expect(transcribe).toHaveBeenCalled()
+    expect(transcribe).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        prompt: undefined,
+        requestId: 'session-1-chunk-0',
+      }),
+    )
     expect(mockUpdateSession).toHaveBeenCalledWith({
       transcription: 'hello world',
       status: 'completed',
@@ -140,18 +190,199 @@ describe('audio processor', () => {
     expect(mockClearSession).toHaveBeenCalled()
   })
 
-  it('aborts when session is cancelled after conversion', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-    }
-    mockGetCurrentSession.mockImplementationOnce(() => session).mockImplementation(() => null)
+  it('merges multiple chunks in chunk order before refining and injecting once', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    mockGetCurrentSession.mockReturnValue(createSession())
+
+    const deferredChunk0 = createDeferred<{
+      text: string
+      id: string
+      created: number
+      model: string
+    }>()
+    const transcribe = vi
+      .fn()
+      .mockImplementationOnce(() => deferredChunk0.promise)
+      .mockResolvedValueOnce({
+        text: 'world',
+        id: 't-2',
+        created: Date.now(),
+        model: 'glm',
+      })
+    const refineText = vi.fn().mockResolvedValue('hello world')
+
+    initProcessor({
+      getAsrProvider: () => ({ transcribe }) as any,
+      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
+      initializeASRProvider: vi.fn(),
+      getRefineService: () =>
+        ({
+          isEnabled: () => true,
+          hasValidConfig: () => true,
+          refineText,
+        }) as any,
+    })
+
+    const chunk0Promise = handleAudioChunk(createChunk({ chunkIndex: 0, isFinal: false }))
+    const chunk1Promise = handleAudioChunk(createChunk({ chunkIndex: 1, isFinal: true }))
+
+    deferredChunk0.resolve({
+      text: 'hello',
+      id: 't-1',
+      created: Date.now(),
+      model: 'glm',
+    })
+
+    await Promise.all([chunk0Promise, chunk1Promise])
+
+    expect(refineText).toHaveBeenCalledWith('hello world')
+    expect(mockHistoryAdd).toHaveBeenCalledTimes(1)
+    expect(mockInjectText).toHaveBeenCalledTimes(1)
+    expect(mockInjectText).toHaveBeenCalledWith('hello world')
+  })
+
+  it('keeps chunk state until missing earlier chunks arrive after the final chunk', async () => {
+    const { initProcessor, handleAudioChunk, __testUtils } = await loadProcessor()
+    mockGetCurrentSession.mockReturnValue(createSession())
+
+    const transcribe = vi
+      .fn()
+      .mockResolvedValueOnce({
+        text: 'world',
+        id: 't-2',
+        created: Date.now(),
+        model: 'glm',
+      })
+      .mockResolvedValueOnce({
+        text: 'hello',
+        id: 't-1',
+        created: Date.now(),
+        model: 'glm',
+      })
+
+    initProcessor({
+      getAsrProvider: () => ({ transcribe }) as any,
+      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
+      initializeASRProvider: vi.fn(),
+    })
+
+    await handleAudioChunk(createChunk({ chunkIndex: 1, isFinal: true }))
+
+    expect(mockHistoryAdd).not.toHaveBeenCalled()
+    expect(mockInjectText).not.toHaveBeenCalled()
+    expect(__testUtils.getChunkSession('session-1')).toBeDefined()
+
+    await handleAudioChunk(createChunk({ chunkIndex: 0, isFinal: false }))
+
+    expect(mockUpdateSession).toHaveBeenCalledWith({
+      transcription: 'hello world',
+      status: 'completed',
+    })
+    expect(mockHistoryAdd).toHaveBeenCalledWith({
+      text: 'hello world',
+      duration: 1200,
+    })
+    expect(mockInjectText).toHaveBeenCalledWith('hello world')
+    expect(__testUtils.getChunkSession('session-1')).toBeUndefined()
+  })
+
+  it('uses prompt context when previous chunks are already available', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    mockGetCurrentSession.mockReturnValue(createSession())
+
+    const transcribe = vi
+      .fn()
+      .mockResolvedValueOnce({
+        text: 'hello',
+        id: 't-1',
+        created: Date.now(),
+        model: 'glm',
+      })
+      .mockResolvedValueOnce({
+        text: 'world',
+        id: 't-2',
+        created: Date.now(),
+        model: 'glm',
+      })
+
+    initProcessor({
+      getAsrProvider: () => ({ transcribe }) as any,
+      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
+      initializeASRProvider: vi.fn(),
+    })
+
+    await handleAudioChunk(createChunk({ chunkIndex: 0, isFinal: false }))
+    await handleAudioChunk(createChunk({ chunkIndex: 1, isFinal: true }))
+
+    expect(transcribe).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        prompt: 'hello',
+        requestId: 'session-1-chunk-1',
+      }),
+    )
+  })
+
+  it('skips prompt context when previous chunk is not ready yet', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    mockGetCurrentSession.mockReturnValue(createSession())
+
+    const deferredChunk0 = createDeferred<{
+      text: string
+      id: string
+      created: number
+      model: string
+    }>()
+    const transcribe = vi
+      .fn()
+      .mockImplementationOnce(() => deferredChunk0.promise)
+      .mockResolvedValueOnce({
+        text: 'world',
+        id: 't-2',
+        created: Date.now(),
+        model: 'glm',
+      })
+
+    initProcessor({
+      getAsrProvider: () => ({ transcribe }) as any,
+      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
+      initializeASRProvider: vi.fn(),
+    })
+
+    const chunk0Promise = handleAudioChunk(createChunk({ chunkIndex: 0, isFinal: false }))
+    const chunk1Promise = handleAudioChunk(createChunk({ chunkIndex: 1, isFinal: true }))
+    await Promise.resolve()
+
+    expect(transcribe).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        prompt: undefined,
+        requestId: 'session-1-chunk-1',
+      }),
+    )
+
+    deferredChunk0.resolve({
+      text: 'hello',
+      id: 't-1',
+      created: Date.now(),
+      model: 'glm',
+    })
+    await Promise.all([chunk0Promise, chunk1Promise])
+  })
+
+  it('drops finalization when the session is cancelled before completion', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    let statusCallCount = 0
+    mockGetCurrentSession.mockImplementation(() => {
+      statusCallCount += 1
+      return statusCallCount <= 2 ? createSession() : null
+    })
 
     const transcribe = vi.fn().mockResolvedValue({
-      text: 'ignored',
-      id: 't-2',
+      text: 'hello world',
+      id: 't-1',
       created: Date.now(),
       model: 'glm',
     })
@@ -162,187 +393,46 @@ describe('audio processor', () => {
       initializeASRProvider: vi.fn(),
     })
 
-    await handleAudioData(Buffer.from('audio'))
+    await handleAudioChunk(createChunk())
 
-    expect(transcribe).not.toHaveBeenCalled()
     expect(mockHistoryAdd).not.toHaveBeenCalled()
     expect(mockInjectText).not.toHaveBeenCalled()
+    expect(mockClearSession).not.toHaveBeenCalled()
   })
 
-  it('reports errors and cleans up on failure', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
+  it('fails fast on chunk error and stops an active recording session', async () => {
+    const { initProcessor, handleAudioChunk } = await loadProcessor()
+    const window = {
+      webContents: {
+        send: vi.fn(),
+      },
     }
-    mockGetCurrentSession.mockReturnValue(session)
-    mockConvertToMP3.mockRejectedValue(new Error('convert fail'))
+    mockGetBackgroundWindow.mockReturnValue(window)
+    mockGetCurrentSession.mockReturnValue(createSession({ status: 'recording' }))
+
+    const transcribe = vi.fn().mockRejectedValue(new Error('ASR down'))
 
     initProcessor({
-      getAsrProvider: () => null,
+      getAsrProvider: () => ({ transcribe }) as any,
       getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
       initializeASRProvider: vi.fn(),
     })
 
     vi.useFakeTimers()
-    const promise = handleAudioData(Buffer.from('audio'))
-    await promise
+    await handleAudioChunk(createChunk())
     await vi.runAllTimersAsync()
     vi.useRealTimers()
 
+    expect(mockUpdateSession).toHaveBeenCalledWith({
+      status: 'error',
+      error: 'ASR down',
+    })
+    expect(window.webContents.send).toHaveBeenCalledWith('session:stop')
     expect(mockUpdateOverlay).toHaveBeenCalledWith({
       status: 'error',
-      message: 'convert fail',
+      message: 'ASR down',
     })
-    expect(mockHideOverlay).toHaveBeenCalled()
-    expect(mockUpdateSession).toHaveBeenCalledWith({ status: 'error' })
-  })
-
-  it('uses refined text when llm refine succeeds', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-      duration: 800,
-    }
-    mockGetCurrentSession.mockReturnValue(session)
-
-    const transcribe = vi.fn().mockResolvedValue({
-      text: 'raw text',
-      id: 't-3',
-      created: Date.now(),
-      model: 'glm',
-    })
-    const refineText = vi.fn().mockResolvedValue('refined text')
-
-    initProcessor({
-      getAsrProvider: () => ({ transcribe }) as any,
-      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
-      initializeASRProvider: vi.fn(),
-      getRefineService: () =>
-        ({
-          isEnabled: () => true,
-          hasValidConfig: () => true,
-          refineText,
-        }) as any,
-    })
-
-    await handleAudioData(Buffer.from('audio'))
-
-    expect(refineText).toHaveBeenCalledWith('raw text')
-    expect(mockHistoryAdd).toHaveBeenCalledWith({
-      text: 'refined text',
-      duration: session.duration,
-    })
-    expect(mockInjectText).toHaveBeenCalledWith('refined text')
-  })
-
-  it('falls back to raw text when llm refine fails', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-      duration: 900,
-    }
-    mockGetCurrentSession.mockReturnValue(session)
-
-    const transcribe = vi.fn().mockResolvedValue({
-      text: 'raw text',
-      id: 't-4',
-      created: Date.now(),
-      model: 'glm',
-    })
-    const refineText = vi.fn().mockRejectedValue(new Error('llm down'))
-
-    initProcessor({
-      getAsrProvider: () => ({ transcribe }) as any,
-      getASRConfig: () => ({ provider: 'glm', region: 'cn', apiKeys: { cn: '', intl: '' } }),
-      initializeASRProvider: vi.fn(),
-      getRefineService: () =>
-        ({
-          isEnabled: () => true,
-          hasValidConfig: () => true,
-          refineText,
-        }) as any,
-    })
-
-    await handleAudioData(Buffer.from('audio'))
-
-    expect(refineText).toHaveBeenCalledWith('raw text')
-    expect(mockHistoryAdd).toHaveBeenCalledWith({
-      text: 'raw text',
-      duration: session.duration,
-    })
-    expect(mockInjectText).toHaveBeenCalledWith('raw text')
-  })
-
-  it('does not apply gain when low volume mode is disabled', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-      duration: 1200,
-    }
-    mockGetCurrentSession.mockReturnValue(session)
-
-    const transcribe = vi.fn().mockResolvedValue({
-      text: 'hello world',
-      id: 't-5',
-      created: Date.now(),
-      model: 'glm',
-    })
-    initProcessor({
-      getAsrProvider: () => ({ transcribe }) as any,
-      getASRConfig: () => ({
-        provider: 'glm',
-        region: 'cn',
-        apiKeys: { cn: '', intl: '' },
-        lowVolumeMode: false,
-      }),
-      initializeASRProvider: vi.fn(),
-    })
-
-    await handleAudioData(Buffer.from('audio'))
-
-    expect(mockConvertToMP3).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
-      gainDb: undefined,
-    })
-  })
-
-  it('applies default gain when low volume mode is undefined', async () => {
-    const { initProcessor, handleAudioData } = await loadProcessor()
-    const session = {
-      id: 'session-1',
-      startTime: new Date(),
-      status: 'recording',
-      duration: 1200,
-    }
-    mockGetCurrentSession.mockReturnValue(session)
-
-    const transcribe = vi.fn().mockResolvedValue({
-      text: 'hello world',
-      id: 't-6',
-      created: Date.now(),
-      model: 'glm',
-    })
-    initProcessor({
-      getAsrProvider: () => ({ transcribe }) as any,
-      getASRConfig: () => ({
-        provider: 'glm',
-        region: 'cn',
-        apiKeys: { cn: '', intl: '' },
-      }),
-      initializeASRProvider: vi.fn(),
-    })
-
-    await handleAudioData(Buffer.from('audio'))
-
-    expect(mockConvertToMP3).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
-      gainDb: 10,
-    })
+    expect(mockHistoryAdd).not.toHaveBeenCalled()
+    expect(mockInjectText).not.toHaveBeenCalled()
   })
 })

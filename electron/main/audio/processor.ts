@@ -1,263 +1,393 @@
-/**
- * 音频数据处理流水线
- *
- * 负责：
- * - 接收渲染进程发来的音频数据
- * - 转换格式（WebM → MP3）
- * - 调用 ASR 进行语音转写
- * - 可选调用文本润色服务进行后处理（失败回退原文）
- * - 注入转写文本到活跃窗口
- * - 保存历史记录
- *
- * @module electron/main/audio/processor
- */
-
 import { app } from 'electron'
 import fs from 'fs'
 import path from 'node:path'
 import { LOW_VOLUME_GAIN_DB } from '../../shared/constants'
-import { updateOverlay, hideOverlay } from '../window/overlay'
+import { IPC_CHANNELS, type ASRConfig, type AudioChunkPayload } from '../../shared/types'
 import { t } from '../i18n'
 import { historyManager } from '../history-manager'
-import { textInjector } from '../text-injector'
-import { convertToMP3 } from './converter'
-import { getCurrentSession, updateSession, clearSession } from './session-manager'
 import type { ASRProvider } from '../asr-provider'
-import type { ASRConfig } from '../../shared/types'
 import type { TextRefiner } from '../refine'
+import { textInjector } from '../text-injector'
+import { getBackgroundWindow } from '../window/background'
+import { hideOverlay, updateOverlay } from '../window/overlay'
+import { convertToMP3 } from './converter'
+import { clearSession, getCurrentSession, updateSession } from './session-manager'
 
-/**
- * 处理器外部依赖
- * ASR Provider 需要通过依赖注入传入
- */
 type ProcessorDeps = {
-  /** 获取 ASR Provider 实例 */
   getAsrProvider: () => ASRProvider | null
-  /** 获取当前 ASR 配置 */
   getASRConfig: () => ASRConfig
-  /** 初始化 ASR Provider */
   initializeASRProvider: () => void
-  /** 获取文本润色服务 */
   getRefineService?: () => TextRefiner | null
 }
 
-let deps: ProcessorDeps
+type ChunkSessionState = {
+  sessionId: string
+  resultsByIndex: Map<number, string>
+  pendingCount: number
+  finalChunkSeen: boolean
+  finalChunkIndex: number | null
+  tempFiles: Set<string>
+  failed: boolean
+  finalized: boolean
+}
 
-/**
- * 初始化处理器依赖
- * 必须在 handleAudioData 之前调用
- */
+const PROMPT_TAIL_MAX_LENGTH = 800
+
+let deps: ProcessorDeps
+const chunkSessions = new Map<string, ChunkSessionState>()
+
 export function initProcessor(dependencies: ProcessorDeps): void {
   deps = dependencies
   console.log('[Audio:Processor] Initialized')
 }
 
-/**
- * 处理音频数据（核心处理流水线）
- *
- * 流程：
- * 1. 保存 WebM 音频到临时文件
- * 2. 转换为 MP3 格式
- * 3. 调用 ASR 服务进行转写
- * 4. 调用文本润色服务进行后处理（失败回退原文）
- * 5. 保存到历史记录
- * 6. 注入文本到活跃窗口
- * 7. 清理临时文件
- *
- * @param buffer - 音频数据 Buffer
- */
-export async function handleAudioData(buffer: Buffer): Promise<void> {
-  const session = getCurrentSession()
-  if (!session) {
-    console.log('[Audio:Processor] Received audio data but no active session')
+export async function handleAudioChunk(payload: AudioChunkPayload): Promise<void> {
+  const sessionState = getOrCreateChunkSession(payload.sessionId)
+
+  if (sessionState.failed || sessionState.finalized) {
+    console.log(
+      `[Audio:Processor] Ignoring chunk ${payload.chunkIndex} for completed/failed session ${payload.sessionId}`,
+    )
     return
   }
 
-  const overallStartTime = Date.now()
-  const timestamp = Date.now()
-  const tempWebmPath = path.join(app.getPath('temp'), `voice-key-${timestamp}.webm`)
-  const tempMp3Path = path.join(app.getPath('temp'), `voice-key-${timestamp}.mp3`)
+  sessionState.pendingCount += 1
+  if (payload.isFinal) {
+    sessionState.finalChunkSeen = true
+    sessionState.finalChunkIndex = payload.chunkIndex
+  }
 
   try {
-    console.log(`[Audio:Processor] Received audio data: ${buffer.length} bytes`)
-
-    // Step 1: 保存 WebM 文件
-    const saveStartTime = Date.now()
-    console.log(`[Audio:Processor] Saving WebM to: ${tempWebmPath}`)
-    fs.writeFileSync(tempWebmPath, buffer)
-    const saveDuration = Date.now() - saveStartTime
-    console.log(`[Audio:Processor] ⏱️ File save: ${saveDuration}ms`)
-
-    // Step 2: 转换为 MP3
-    const asrConfig = deps.getASRConfig()
-    const lowVolumeModeEnabled = asrConfig.lowVolumeMode ?? true
-    console.log(`[Audio:Processor] Low volume mode enabled: ${lowVolumeModeEnabled}`)
-    const conversionStartTime = Date.now()
-    await convertToMP3(tempWebmPath, tempMp3Path, {
-      gainDb: lowVolumeModeEnabled ? LOW_VOLUME_GAIN_DB : undefined,
-    })
-    const conversionDuration = Date.now() - conversionStartTime
-
-    // 检查取消
-    if (!getCurrentSession()) {
-      console.log('[Audio:Processor] Session cancelled during conversion, aborting')
-      cleanupTempFiles(tempWebmPath, tempMp3Path)
-      return
-    }
-
-    // Step 3: ASR 转写
-    let asrProvider = deps.getAsrProvider()
-    if (!asrProvider) {
-      console.log('[Audio:Processor] Initializing ASR provider...')
-      const initStartTime = Date.now()
-      deps.initializeASRProvider()
-      asrProvider = deps.getAsrProvider()
-      if (!asrProvider) {
-        throw new Error('ASR Provider initialization failed')
-      }
-      console.log(`[Audio:Processor] ⏱️ ASR init: ${Date.now() - initStartTime}ms`)
-    }
-
-    const asrStartTime = Date.now()
-    console.log('[Audio:Processor] Sending audio to ASR service...')
-    const transcription = await asrProvider.transcribe(tempMp3Path)
-    const asrDuration = Date.now() - asrStartTime
-    console.log(`[Audio:Processor] ⏱️ ASR transcription: ${asrDuration}ms`)
-    console.log(`[Audio:Processor] Transcription received (length): ${transcription.text.length}`)
-    const rawText = transcription.text
-
-    // 检查取消
-    if (!getCurrentSession()) {
-      console.log('[Audio:Processor] Session cancelled during transcription, aborting')
-      cleanupTempFiles(tempWebmPath, tempMp3Path)
-      return
-    }
-
-    // Step 4: 文本润色（失败则回退原文）
-    let finalText = rawText
-    let refineDuration = 0
-    const refineService = deps.getRefineService?.() ?? null
-
-    if (refineService?.isEnabled()) {
-      if (refineService.hasValidConfig()) {
-        const refineStartTime = Date.now()
-        try {
-          console.log('[Audio:Processor] Refining transcription with text refinement service...')
-          const refined = await refineService.refineText(rawText)
-          refineDuration = Date.now() - refineStartTime
-          if (refined.trim().length > 0) {
-            finalText = refined
-            console.log(`[Audio:Processor] ⏱️ Text refine: ${refineDuration}ms`)
-          } else {
-            console.warn(
-              '[Audio:Processor] Text refinement returned empty text, using raw transcription',
-            )
-          }
-        } catch (error) {
-          refineDuration = Date.now() - refineStartTime
-          console.error('[Audio:Processor] Text refinement failed, using raw transcription:', error)
-        }
-      } else {
-        console.warn('[Audio:Processor] Text refinement enabled but config is incomplete, skipped')
-      }
-    }
-
-    // 检查取消（润色后）
-    if (!getCurrentSession()) {
-      console.log('[Audio:Processor] Session cancelled during refine, aborting')
-      cleanupTempFiles(tempWebmPath, tempMp3Path)
-      return
-    }
-
-    // Step 5: 更新会话状态
-    updateSession({
-      transcription: finalText,
-      status: 'completed',
-    })
-
-    // Step 6: 保存历史记录
-    historyManager.add({
-      text: finalText,
-      duration: getCurrentSession()?.duration,
-    })
-
-    // 检查取消（注入前最后一次检查）
-    if (!getCurrentSession()) {
-      console.log('[Audio:Processor] Session cancelled before injection, aborting')
-      cleanupTempFiles(tempWebmPath, tempMp3Path)
-      return
-    }
-
-    // Step 7: 注入文本
-    const injectStartTime = Date.now()
-    console.log('[Audio:Processor] Injecting text...')
-    await textInjector.injectText(finalText)
-    const injectDuration = Date.now() - injectStartTime
-    console.log(`[Audio:Processor] ⏱️ Text injection: ${injectDuration}ms`)
-
-    // Step 8: 完成
-    updateOverlay({ status: 'success' })
-    setTimeout(() => hideOverlay(), 800)
-
-    // Step 9: 清理
-    const cleanupStartTime = Date.now()
-    cleanupTempFiles(tempWebmPath, tempMp3Path)
-    const cleanupDuration = Date.now() - cleanupStartTime
-
-    // 清除会话
-    clearSession()
-
-    // 输出性能统计
-    const overallDuration = Date.now() - overallStartTime
-    console.log(`[Audio:Processor] ⏱️ ========================================`)
-    console.log(`[Audio:Processor] ⏱️ TOTAL PROCESSING TIME: ${overallDuration}ms`)
-    console.log(`[Audio:Processor] ⏱️ Breakdown:`)
-    console.log(
-      `[Audio:Processor] ⏱️   - File save: ${saveDuration}ms (${((saveDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(
-      `[Audio:Processor] ⏱️   - Conversion: ${conversionDuration}ms (${((conversionDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(
-      `[Audio:Processor] ⏱️   - ASR: ${asrDuration}ms (${((asrDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(
-      `[Audio:Processor] ⏱️   - Refine: ${refineDuration}ms (${((refineDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(
-      `[Audio:Processor] ⏱️   - Injection: ${injectDuration}ms (${((injectDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(
-      `[Audio:Processor] ⏱️   - Cleanup: ${cleanupDuration}ms (${((cleanupDuration / overallDuration) * 100).toFixed(1)}%)`,
-    )
-    console.log(`[Audio:Processor] ⏱️ ========================================`)
+    await processChunk(payload, sessionState)
   } catch (error) {
-    const errorDuration = Date.now() - overallStartTime
-    console.error(`[Audio:Processor] Processing failed after ${errorDuration}ms:`, error)
+    failSession(payload.sessionId, sessionState, error)
+  } finally {
+    sessionState.pendingCount = Math.max(0, sessionState.pendingCount - 1)
 
-    updateOverlay({
-      status: 'error',
-      message: error instanceof Error ? error.message : t('errors.generic'),
-    })
-    setTimeout(() => hideOverlay(), 2000)
+    if (!sessionState.failed) {
+      try {
+        await finalizeSessionIfReady(sessionState)
+      } catch (error) {
+        failSession(payload.sessionId, sessionState, error)
+      }
+    }
 
-    updateSession({ status: 'error' })
-    cleanupTempFiles(tempWebmPath, tempMp3Path)
+    releaseChunkSessionIfPossible(sessionState)
   }
 }
 
-/**
- * 清理临时文件
- */
-function cleanupTempFiles(...paths: string[]): void {
-  for (const p of paths) {
-    try {
-      if (fs.existsSync(p)) {
-        fs.unlinkSync(p)
-        console.log(`[Audio:Processor] Cleaned up: ${path.basename(p)}`)
-      }
-    } catch (e) {
-      console.error(`[Audio:Processor] Cleanup failed for ${p}:`, e)
+function getOrCreateChunkSession(sessionId: string): ChunkSessionState {
+  const existing = chunkSessions.get(sessionId)
+  if (existing) return existing
+
+  const sessionState: ChunkSessionState = {
+    sessionId,
+    resultsByIndex: new Map(),
+    pendingCount: 0,
+    finalChunkSeen: false,
+    finalChunkIndex: null,
+    tempFiles: new Set(),
+    failed: false,
+    finalized: false,
+  }
+  chunkSessions.set(sessionId, sessionState)
+  return sessionState
+}
+
+async function processChunk(
+  payload: AudioChunkPayload,
+  sessionState: ChunkSessionState,
+): Promise<void> {
+  if (!isSessionUsable(payload.sessionId)) {
+    console.log(
+      `[Audio:Processor] Session ${payload.sessionId} is inactive, skipping chunk ${payload.chunkIndex}`,
+    )
+    return
+  }
+
+  const timestamp = Date.now()
+  const inputExtension = resolveAudioExtension(payload.mimeType)
+  const tempInputPath = path.join(
+    app.getPath('temp'),
+    `voice-key-${payload.sessionId}-${payload.chunkIndex}-${timestamp}.${inputExtension}`,
+  )
+  const tempMp3Path = path.join(
+    app.getPath('temp'),
+    `voice-key-${payload.sessionId}-${payload.chunkIndex}-${timestamp}.mp3`,
+  )
+  sessionState.tempFiles.add(tempInputPath)
+  sessionState.tempFiles.add(tempMp3Path)
+
+  const inputBuffer = Buffer.from(payload.buffer)
+  console.log(
+    `[Audio:Processor] Received chunk ${payload.chunkIndex} for ${payload.sessionId}: ${inputBuffer.length} bytes`,
+  )
+
+  try {
+    fs.writeFileSync(tempInputPath, inputBuffer)
+
+    const asrConfig = deps.getASRConfig()
+    const lowVolumeModeEnabled = asrConfig.lowVolumeMode ?? true
+    await convertToMP3(tempInputPath, tempMp3Path, {
+      gainDb: lowVolumeModeEnabled ? LOW_VOLUME_GAIN_DB : undefined,
+    })
+
+    if (sessionState.failed || !isSessionUsable(payload.sessionId)) {
+      return
+    }
+
+    const asrProvider = getInitializedAsrProvider()
+    const prompt = buildPromptForChunk(sessionState, payload.chunkIndex)
+    const requestId = `${payload.sessionId}-chunk-${payload.chunkIndex}`
+
+    const transcription = await asrProvider.transcribe(tempMp3Path, {
+      prompt,
+      requestId,
+    })
+
+    if (sessionState.failed || !isSessionUsable(payload.sessionId)) {
+      return
+    }
+
+    sessionState.resultsByIndex.set(payload.chunkIndex, transcription.text)
+    console.log(
+      `[Audio:Processor] Chunk ${payload.chunkIndex} transcription received (length: ${transcription.text.length})`,
+    )
+  } finally {
+    cleanupTempFiles(sessionState, tempInputPath, tempMp3Path)
+  }
+}
+
+function getInitializedAsrProvider(): ASRProvider {
+  let asrProvider = deps.getAsrProvider()
+  if (asrProvider) return asrProvider
+
+  console.log('[Audio:Processor] Initializing ASR provider...')
+  deps.initializeASRProvider()
+  asrProvider = deps.getAsrProvider()
+  if (!asrProvider) {
+    throw new Error('ASR Provider initialization failed')
+  }
+
+  return asrProvider
+}
+
+async function finalizeSessionIfReady(sessionState: ChunkSessionState): Promise<void> {
+  if (sessionState.finalized || sessionState.failed) return
+  if (!sessionState.finalChunkSeen || sessionState.finalChunkIndex === null) return
+  if (sessionState.pendingCount > 0) return
+
+  for (let index = 0; index <= sessionState.finalChunkIndex; index += 1) {
+    if (!sessionState.resultsByIndex.has(index)) {
+      return
     }
   }
+
+  const currentSession = getCurrentSession()
+  if (
+    !currentSession ||
+    currentSession.id !== sessionState.sessionId ||
+    currentSession.status === 'error'
+  ) {
+    console.log(
+      `[Audio:Processor] Session ${sessionState.sessionId} is no longer active during finalize, skipping`,
+    )
+    return
+  }
+
+  sessionState.finalized = true
+
+  const orderedTexts: string[] = []
+  for (let index = 0; index <= sessionState.finalChunkIndex; index += 1) {
+    orderedTexts.push(sessionState.resultsByIndex.get(index) ?? '')
+  }
+
+  const rawText = mergeTranscriptSegments(orderedTexts)
+  let finalText = rawText
+
+  const refineService = deps.getRefineService?.() ?? null
+  if (refineService?.isEnabled()) {
+    if (refineService.hasValidConfig()) {
+      if (!isSessionUsable(sessionState.sessionId)) return
+
+      try {
+        console.log('[Audio:Processor] Refining aggregated transcription...')
+        const refined = await refineService.refineText(rawText)
+        if (refined.trim().length > 0) {
+          finalText = refined
+        } else {
+          console.warn(
+            '[Audio:Processor] Text refinement returned empty text, using raw transcription',
+          )
+        }
+      } catch (error) {
+        console.error('[Audio:Processor] Text refinement failed, using raw transcription:', error)
+      }
+    } else {
+      console.warn('[Audio:Processor] Text refinement enabled but config is incomplete, skipped')
+    }
+  }
+
+  if (!isSessionUsable(sessionState.sessionId)) {
+    return
+  }
+
+  updateSession({
+    transcription: finalText,
+    status: 'completed',
+  })
+
+  historyManager.add({
+    text: finalText,
+    duration: getCurrentSession()?.duration,
+  })
+
+  if (!isSessionUsable(sessionState.sessionId)) {
+    return
+  }
+
+  console.log('[Audio:Processor] Injecting final text...')
+  await textInjector.injectText(finalText)
+
+  updateOverlay({ status: 'success' })
+  setTimeout(() => hideOverlay(), 800)
+  clearSession()
+}
+
+function failSession(sessionId: string, sessionState: ChunkSessionState, error: unknown): void {
+  if (sessionState.failed) return
+  sessionState.failed = true
+
+  const message = error instanceof Error ? error.message : t('errors.generic')
+  console.error(`[Audio:Processor] Session ${sessionId} failed:`, error)
+
+  cleanupAllSessionTempFiles(sessionState)
+
+  const currentSession = getCurrentSession()
+  if (!currentSession || currentSession.id !== sessionId) {
+    return
+  }
+
+  const wasRecording = currentSession.status === 'recording'
+  updateSession({ status: 'error', error: message })
+
+  if (wasRecording) {
+    const bgWindow = getBackgroundWindow()
+    if (bgWindow) {
+      bgWindow.webContents.send(IPC_CHANNELS.SESSION_STOP)
+    }
+  }
+
+  updateOverlay({
+    status: 'error',
+    message,
+  })
+  setTimeout(() => hideOverlay(), 2000)
+}
+
+function releaseChunkSessionIfPossible(sessionState: ChunkSessionState): void {
+  if (sessionState.pendingCount > 0) return
+
+  const currentSession = getCurrentSession()
+  const isCurrentSession = currentSession?.id === sessionState.sessionId
+  const shouldRelease = sessionState.finalized || sessionState.failed || !isCurrentSession
+
+  if (!shouldRelease) return
+
+  cleanupAllSessionTempFiles(sessionState)
+  chunkSessions.delete(sessionState.sessionId)
+}
+
+function cleanupAllSessionTempFiles(sessionState: ChunkSessionState): void {
+  if (sessionState.tempFiles.size === 0) return
+  cleanupTempFiles(sessionState, ...sessionState.tempFiles)
+}
+
+function cleanupTempFiles(sessionState: ChunkSessionState, ...paths: string[]): void {
+  for (const filePath of paths) {
+    try {
+      sessionState.tempFiles.delete(filePath)
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath)
+        console.log(`[Audio:Processor] Cleaned up: ${path.basename(filePath)}`)
+      }
+    } catch (error) {
+      console.error(`[Audio:Processor] Cleanup failed for ${filePath}:`, error)
+    }
+  }
+}
+
+function buildPromptForChunk(
+  sessionState: ChunkSessionState,
+  chunkIndex: number,
+): string | undefined {
+  if (chunkIndex <= 0) return undefined
+
+  const readyTexts: string[] = []
+  for (let index = 0; index < chunkIndex; index += 1) {
+    const text = sessionState.resultsByIndex.get(index)
+    if (!text) {
+      return undefined
+    }
+    readyTexts.push(text)
+  }
+
+  const prompt = mergeTranscriptSegments(readyTexts).slice(-PROMPT_TAIL_MAX_LENGTH)
+  return prompt.length > 0 ? prompt : undefined
+}
+
+function mergeTranscriptSegments(segments: string[]): string {
+  let merged = ''
+
+  for (const segment of segments) {
+    const normalizedSegment = segment.trim()
+    if (!normalizedSegment) continue
+
+    if (!merged) {
+      merged = normalizedSegment
+      continue
+    }
+
+    const left = merged.replace(/\s+$/u, '')
+    const right = normalizedSegment.replace(/^\s+/u, '')
+    const leftLastChar = left.length > 0 ? left[left.length - 1] : undefined
+    const needsSpace = isAsciiWordBoundary(leftLastChar, right[0])
+    merged = needsSpace ? `${left} ${right}` : `${left}${right}`
+  }
+
+  return merged
+}
+
+function isAsciiWordBoundary(left?: string, right?: string): boolean {
+  return isAsciiWordChar(left) && isAsciiWordChar(right)
+}
+
+function isAsciiWordChar(value?: string): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9_]$/.test(value)
+}
+
+function resolveAudioExtension(mimeType: string): string {
+  const normalized = mimeType.toLowerCase()
+  if (normalized.includes('wav')) return 'wav'
+  if (normalized.includes('mpeg') || normalized.includes('mp3')) return 'mp3'
+  if (normalized.includes('ogg')) return 'ogg'
+  if (normalized.includes('webm')) return 'webm'
+  return 'webm'
+}
+
+function isSessionUsable(sessionId: string): boolean {
+  const currentSession = getCurrentSession()
+  return Boolean(
+    currentSession && currentSession.id === sessionId && currentSession.status !== 'error',
+  )
+}
+
+export const __testUtils = {
+  buildPromptForChunk,
+  mergeTranscriptSegments,
+  resolveAudioExtension,
+  resetChunkSessions: () => {
+    chunkSessions.clear()
+  },
+  getChunkSession: (sessionId: string) => chunkSessions.get(sessionId),
 }

@@ -1,12 +1,13 @@
-// 共享常量
+// Shared constants
 
-// GLM ASR API 配置
+// GLM ASR API defaults and limits
 export const GLM_ASR = {
   ENDPOINT: 'https://open.bigmodel.cn/api/paas/v4/audio/transcriptions',
   ENDPOINT_INTL: 'https://api.z.ai/api/paas/v4/audio/transcriptions',
   MODEL: 'glm-asr-2512',
-  MAX_DURATION: 30, // 最大录音时长（秒）
-  MAX_FILE_SIZE: 25 * 1024 * 1024, // 最大文件大小（25MB）
+  REQUEST_MAX_DURATION_SECONDS: 29,
+  SESSION_MAX_DURATION_SECONDS: 180,
+  MAX_FILE_SIZE: 25 * 1024 * 1024,
 } as const
 
 export const OPENAI_CHAT = {
@@ -47,14 +48,13 @@ export const LLM_REFINE = {
   API_KEY: '',
 } as const
 
-// 默认快捷键配置
 const isMac = typeof process !== 'undefined' && process.platform === 'darwin'
+
 export const DEFAULT_HOTKEYS = {
   PTT: isMac ? 'Alt' : 'Control+Shift+Space',
   SETTINGS: isMac ? 'Command+Shift+,' : 'Control+Shift+,',
 } as const
 
-// 录音配置
 export const AUDIO_CONFIG = {
   SAMPLE_RATE: 16000,
   CHANNELS: 1,
@@ -62,12 +62,10 @@ export const AUDIO_CONFIG = {
   BIT_DEPTH: 16,
 } as const
 
-// 低音量模式固定增益（dB）
 export const LOW_VOLUME_GAIN_DB = 10
 
 export const HISTORY_RETENTION_DAYS = 90
 
-// 日志保留与限制
 export const LOG_RETENTION_DAYS = 14
 export const LOG_FILE_MAX_SIZE_MB = 5
 export const LOG_FILE_MAX_SIZE_BYTES = LOG_FILE_MAX_SIZE_MB * 1024 * 1024

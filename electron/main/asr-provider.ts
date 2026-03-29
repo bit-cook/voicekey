@@ -3,7 +3,7 @@ import FormData from 'form-data'
 import fs from 'fs'
 import { createHash } from 'node:crypto'
 import { GLM_ASR } from '../shared/constants'
-import { ASRConfig } from '../shared/types'
+import type { ASRConfig } from '../shared/types'
 
 export interface TranscriptionResult {
   text: string
@@ -12,9 +12,9 @@ export interface TranscriptionResult {
   model: string
 }
 
-export interface TranscriptionError {
-  code: string
-  message: string
+export interface TranscribeAudioOptions {
+  prompt?: string
+  requestId?: string
 }
 
 export class ASRProvider {
@@ -24,25 +24,22 @@ export class ASRProvider {
     this.config = config
   }
 
-  // 更新配置
   updateConfig(config: ASRConfig): void {
     this.config = config
   }
 
-  // 转录音频文件
-  async transcribe(audioFilePath: string): Promise<TranscriptionResult> {
+  async transcribe(
+    audioFilePath: string,
+    options: TranscribeAudioOptions = {},
+  ): Promise<TranscriptionResult> {
     const transcribeStartTime = Date.now()
 
-    // Determine Region and API Key
     const region = this.config.region || 'cn'
     const apiKey = this.config.apiKeys[region]
-
     if (!apiKey) {
       throw new Error(`API Key not configured for region: ${region}`)
     }
 
-    // Determine Endpoint
-    // Use user-configured endpoint if available, otherwise use default for the region
     let endpoint = this.config.endpoint
     if (!endpoint) {
       endpoint = region === 'intl' ? GLM_ASR.ENDPOINT_INTL : GLM_ASR.ENDPOINT
@@ -62,8 +59,18 @@ export class ASRProvider {
       if (this.config.language) {
         formData.append('language', this.config.language)
       }
+      if (options.prompt) {
+        formData.append('prompt', options.prompt)
+      }
+      if (options.requestId) {
+        formData.append('request_id', options.requestId)
+      }
+
       const formDataDuration = Date.now() - formDataStartTime
-      console.log(`[ASR] ⏱️  FormData preparation took ${formDataDuration}ms`)
+      console.log(`[ASR] FormData preparation took ${formDataDuration}ms`)
+      if (options.requestId) {
+        console.log(`[ASR] Request ID: ${options.requestId}`)
+      }
 
       const requestStartTime = Date.now()
       console.log(
@@ -80,9 +87,10 @@ export class ASRProvider {
         responseType: 'json',
         responseEncoding: 'utf8',
       })
+
       const requestDuration = Date.now() - requestStartTime
       console.log(`[ASR] [${new Date().toISOString()}] API response received`)
-      console.log(`[ASR] ⏱️  API network request took ${requestDuration}ms`)
+      console.log(`[ASR] API network request took ${requestDuration}ms`)
 
       if (!response.data || !response.data.text) {
         throw new Error('Invalid response from ASR service')
@@ -94,7 +102,7 @@ export class ASRProvider {
       console.log('[ASR] Text hash (sha256):', textHash)
 
       const totalDuration = Date.now() - transcribeStartTime
-      console.log(`[ASR] ⏱️  Total transcribe() call took ${totalDuration}ms`)
+      console.log(`[ASR] Total transcribe() call took ${totalDuration}ms`)
 
       return {
         text: receivedText,
@@ -102,7 +110,7 @@ export class ASRProvider {
         created: response.data.created || Date.now(),
         model: response.data.model || GLM_ASR.MODEL,
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       const errorDuration = Date.now() - transcribeStartTime
       console.error(`[ASR] Transcription failed after ${errorDuration}ms`)
       if (axios.isAxiosError(error)) {
@@ -116,7 +124,6 @@ export class ASRProvider {
     }
   }
 
-  // 测试API连接
   async testConnection(): Promise<boolean> {
     try {
       const region = this.config.region || 'cn'
@@ -131,11 +138,6 @@ export class ASRProvider {
         endpoint = region === 'intl' ? GLM_ASR.ENDPOINT_INTL : GLM_ASR.ENDPOINT
       }
 
-      // 创建一个简单的测试请求
-      // 由于GLM ASR需要音频文件，这里只做一个简单的端点检查
-      // 使用 POST 请求，因为 api.z.ai 可能不支持 HEAD
-      // 即使没有文件，如果 API Key 正确，服务端通常会返回 400 (Bad Request)
-      // 如果 Key 错误，则返回 401 (Unauthorized)
       try {
         await axios.post(
           endpoint,
@@ -149,16 +151,11 @@ export class ASRProvider {
         )
         return true
       } catch (error) {
-        if (axios.isAxiosError(error) && error.response) {
-          // 400 意味着缺少参数（文件），但连接和认证通常通过了（或者至少连接通过了）
-          // 严谨一点，401 肯定是 Key 错
-          if (error.response.status === 400) {
-            return true
-          }
+        if (axios.isAxiosError(error) && error.response?.status === 400) {
+          return true
         }
         throw error
       }
-      return true
     } catch (error) {
       console.error('Connection test failed:', error)
       return false
