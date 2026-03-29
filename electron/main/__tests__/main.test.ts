@@ -8,6 +8,17 @@ const appState = vi.hoisted(() => ({
   readyResolve: null as null | (() => void),
 }))
 
+const envState = vi.hoisted(() => ({
+  viteDevServerUrl: 'http://localhost:5173' as string | undefined,
+}))
+
+const loginItemState = vi.hoisted(() => ({
+  value: {
+    wasOpenedAsHidden: false,
+    wasOpenedAtLogin: false,
+  },
+}))
+
 const mockWhenReady = vi.hoisted(() =>
   vi.fn(() => {
     if (!appState.readyPromise) {
@@ -26,7 +37,7 @@ const mockAppOn = vi.hoisted(() =>
 )
 
 const mockSetLoginItemSettings = vi.hoisted(() => vi.fn())
-const mockGetLoginItemSettings = vi.hoisted(() => vi.fn(() => ({ wasOpenedAsHidden: false })))
+const mockGetLoginItemSettings = vi.hoisted(() => vi.fn(() => loginItemState.value))
 const mockSetName = vi.hoisted(() => vi.fn())
 const mockDockSetIcon = vi.hoisted(() => vi.fn())
 const mockGetAllWindows = vi.hoisted(() => vi.fn((): any[] => []))
@@ -103,7 +114,9 @@ vi.mock('electron', () => ({
 
 vi.mock('../env', () => ({
   initEnv: mockInitEnv,
-  VITE_DEV_SERVER_URL: 'http://localhost:5173',
+  get VITE_DEV_SERVER_URL() {
+    return envState.viteDevServerUrl
+  },
 }))
 
 vi.mock('../logger', () => ({
@@ -201,12 +214,20 @@ const runReady = async () => {
 }
 
 describe('main startup', () => {
+  const originalPlatform = process.platform
+  const originalArgv = [...process.argv]
+
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
     appState.listeners.clear()
     appState.readyPromise = null
     appState.readyResolve = null
+    envState.viteDevServerUrl = 'http://localhost:5173'
+    loginItemState.value = {
+      wasOpenedAsHidden: false,
+      wasOpenedAtLogin: false,
+    }
     process.env.VITE_PUBLIC = '/tmp'
     mockCheckPermissions.mockResolvedValue({
       hasPermission: true,
@@ -216,12 +237,19 @@ describe('main startup', () => {
       value: 'darwin',
       configurable: true,
     })
+    Object.defineProperty(process, 'argv', {
+      value: ['voice-key'],
+      configurable: true,
+    })
   })
 
-  const originalPlatform = process.platform
   afterEach(() => {
     Object.defineProperty(process, 'platform', {
       value: originalPlatform,
+      configurable: true,
+    })
+    Object.defineProperty(process, 'argv', {
+      value: originalArgv,
       configurable: true,
     })
   })
@@ -271,6 +299,89 @@ describe('main startup', () => {
     expect(mockCheckForUpdates).toHaveBeenCalled()
     expect(mockRegisterGlobalHotkeys).toHaveBeenCalled()
     expect(mockIoHookStart).toHaveBeenCalled()
+    expect(mockCreateSettingsWindow).toHaveBeenCalled()
+  })
+
+  it('registers silent startup args on windows', async () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    })
+
+    await importMain()
+    await runReady()
+
+    expect(mockSetLoginItemSettings).toHaveBeenCalledWith({
+      openAtLogin: true,
+      path: process.execPath,
+      args: ['--startup-hidden'],
+    })
+  })
+
+  it('does not open settings window for hidden startup on windows in production', async () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    })
+    Object.defineProperty(process, 'argv', {
+      value: ['voice-key.exe', '--startup-hidden'],
+      configurable: true,
+    })
+    envState.viteDevServerUrl = undefined
+
+    await importMain()
+    await runReady()
+
+    expect(mockCreateBackgroundWindow).toHaveBeenCalled()
+    expect(mockCreateTray).toHaveBeenCalled()
+    expect(mockCreateSettingsWindow).not.toHaveBeenCalled()
+  })
+
+  it('opens settings window for manual launch on windows in production', async () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    })
+    Object.defineProperty(process, 'argv', {
+      value: ['voice-key.exe'],
+      configurable: true,
+    })
+    envState.viteDevServerUrl = undefined
+
+    await importMain()
+    await runReady()
+
+    expect(mockCreateSettingsWindow).toHaveBeenCalled()
+  })
+
+  it('does not open settings window for login launch on macOS in production', async () => {
+    envState.viteDevServerUrl = undefined
+    loginItemState.value = {
+      wasOpenedAsHidden: false,
+      wasOpenedAtLogin: true,
+    }
+
+    await importMain()
+    await runReady()
+
+    expect(mockCreateBackgroundWindow).toHaveBeenCalled()
+    expect(mockCreateTray).toHaveBeenCalled()
+    expect(mockCreateSettingsWindow).not.toHaveBeenCalled()
+  })
+
+  it('still opens settings window in development during hidden startup', async () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    })
+    Object.defineProperty(process, 'argv', {
+      value: ['voice-key.exe', '--startup-hidden'],
+      configurable: true,
+    })
+
+    await importMain()
+    await runReady()
+
     expect(mockCreateSettingsWindow).toHaveBeenCalled()
   })
 

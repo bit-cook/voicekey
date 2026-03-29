@@ -66,7 +66,7 @@
     "appLanguage": "界面语言",
     "systemLanguage": "跟随系统",
     "autoLaunch": "开机自动启动",
-    "autoLaunchHelp": "系统登录时自动启动 Voice Key",
+    "autoLaunchHelp": "系统登录时在后台启动 Voice Key，不自动打开窗口",
     "asrConfig": "GLM ASR 配置",
     "llmRefineConfig": "文本润色",
     "llmRefineEnabled": "启用润色",

@@ -152,6 +152,29 @@ describe('config-handlers (unit)', () => {
     expect(refreshLocalizedUi).toHaveBeenCalled()
   })
 
+  it('updates app config and disables autolaunch when requested', async () => {
+    const { ipcMain, handlers } = createHandlers()
+    setupModuleMocks(ipcMain)
+    const { initConfigHandlers, registerConfigHandlers } = await import('../config-handlers')
+
+    const updateAutoLaunchState = vi.fn()
+
+    initConfigHandlers(
+      createConfigDeps({
+        updateAutoLaunchState,
+      }),
+    )
+    registerConfigHandlers()
+
+    const handler = handlers.get(IPC_CHANNELS.CONFIG_SET)
+    await handler?.(null, { app: { autoLaunch: false } })
+
+    expect(mockConfigManager.setAppConfig).toHaveBeenCalledWith({
+      autoLaunch: false,
+    })
+    expect(updateAutoLaunchState).toHaveBeenCalledWith(false)
+  })
+
   it('updates ASR config and reinitializes provider', async () => {
     const { ipcMain, handlers } = createHandlers()
     setupModuleMocks(ipcMain)

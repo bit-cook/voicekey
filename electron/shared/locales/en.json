@@ -66,7 +66,7 @@
     "appLanguage": "Interface language",
     "systemLanguage": "System default",
     "autoLaunch": "Launch on startup",
-    "autoLaunchHelp": "Automatically start Voice Key when you log in",
+    "autoLaunchHelp": "Start Voice Key in the background when you log in without opening the window",
     "asrConfig": "GLM ASR Configuration",
     "llmRefineConfig": "Text Refinement",
     "llmRefineEnabled": "Enable refinement",

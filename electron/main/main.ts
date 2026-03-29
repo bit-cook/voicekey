@@ -56,16 +56,46 @@ import { initEnv, VITE_DEV_SERVER_URL } from './env'
 // 全局变量
 let asrProvider: ASRProvider | null = null
 let refineService: RefineService | null = null
+const STARTUP_HIDDEN_ARG = '--startup-hidden'
 
 // 设置开机自启
 function updateAutoLaunchState(enable: boolean) {
   console.log(`[Main] Updating auto-launch state: ${enable}`)
-  // Windows/macOS 通用 API
-  // openAsHidden: true 让应用启动时隐藏主窗口（只显示托盘）
+
+  if (process.platform === 'win32') {
+    app.setLoginItemSettings({
+      openAtLogin: enable,
+      path: process.execPath,
+      args: [STARTUP_HIDDEN_ARG],
+    })
+    return
+  }
+
   app.setLoginItemSettings({
     openAtLogin: enable,
     openAsHidden: true,
   })
+}
+
+function isSilentStartupLaunch(): boolean {
+  if (process.platform === 'win32') {
+    return process.argv.includes(STARTUP_HIDDEN_ARG)
+  }
+
+  if (process.platform === 'darwin') {
+    const loginItemSettings = app.getLoginItemSettings()
+    return loginItemSettings.wasOpenedAtLogin || loginItemSettings.wasOpenedAsHidden
+  }
+
+  return false
+}
+
+function shouldOpenSettingsWindowOnLaunch(): boolean {
+  if (VITE_DEV_SERVER_URL) {
+    return true
+  }
+
+  return !isSilentStartupLaunch()
 }
 
 // 初始化ASR Provider
@@ -175,10 +205,9 @@ app.whenReady().then(async () => {
 
   // 启动时窗口策略：
   // 1. 开发环境：总是打开
-  // 2. 生产环境：如果是用户手动启动（非隐藏启动），则打开
-  // isHiddenLaunch: macOS 上通过 setLoginItemSettings({ openAsHidden: true }) 启动时为 true
-  const isHiddenLaunch = app.getLoginItemSettings().wasOpenedAsHidden
-  if (VITE_DEV_SERVER_URL || !isHiddenLaunch) {
+  // 2. 生产环境：仅用户手动启动时自动打开设置窗口
+  // 3. 开机自启时只保留后台能力与托盘，不抢前台
+  if (shouldOpenSettingsWindowOnLaunch()) {
     createSettingsWindow()
   }
 
