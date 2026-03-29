@@ -91,18 +91,20 @@ const buildTrendData = (
   return points
 }
 
-const chartConfig = {
-  characters: {
-    label: 'Characters',
-    color: 'var(--chart-1)',
-  },
-} satisfies ChartConfig
-
 export default function InteractiveCharts({ historyItems, loading }: InteractiveChartsProps) {
   const { t, i18n } = useTranslation()
   const [timeRange, setTimeRange] = React.useState('7d')
 
   const locale = getLocale(i18n.language)
+  const chartConfig = React.useMemo<ChartConfig>(
+    () => ({
+      characters: {
+        label: t('home.chart.seriesLabel'),
+        color: 'var(--chart-1)',
+      },
+    }),
+    [i18n.language, t],
+  )
   const dayFormatter = React.useMemo(
     () => new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }),
     [locale],
@@ -136,9 +138,9 @@ export default function InteractiveCharts({ historyItems, loading }: Interactive
         <Select value={timeRange} onValueChange={setTimeRange}>
           <SelectTrigger
             className="cursor-pointer hidden w-[160px] rounded-lg sm:ml-auto sm:flex"
-            aria-label="Select a value"
+            aria-label={t('home.chart.rangeSelectAriaLabel')}
           >
-            <SelectValue placeholder="Last 3 months" />
+            <SelectValue placeholder={t('home.chart.rangePlaceholder')} />
           </SelectTrigger>
           <SelectContent className="rounded-xl">
             <SelectItem value="90d" className="rounded-lg">

@@ -34,7 +34,10 @@
     "chart": {
       "title": "识别量趋势",
       "description": "所选时间范围内的识别字符数",
-      "ariaLabel": "识别量趋势"
+      "ariaLabel": "识别量趋势",
+      "seriesLabel": "字符数",
+      "rangeSelectAriaLabel": "选择时间范围",
+      "rangePlaceholder": "最近 3 个月"
     },
     "summary": {
       "avgPerDay": "日均",

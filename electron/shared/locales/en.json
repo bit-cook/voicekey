@@ -34,7 +34,10 @@
     "chart": {
       "title": "Recognition volume",
       "description": "Characters recognized in the selected range",
-      "ariaLabel": "Recognition volume trend"
+      "ariaLabel": "Recognition volume trend",
+      "seriesLabel": "Characters",
+      "rangeSelectAriaLabel": "Select time range",
+      "rangePlaceholder": "Last 3 months"
     },
     "summary": {
       "avgPerDay": "Avg per day",
