@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.12](https://github.com/BuildWithAIs/voicekey/compare/v0.1.11...v0.1.12) (2026-03-30)
+
+### Features
+
+- add optional English output mode for transcript refine ([bc658dd](https://github.com/BuildWithAIs/voicekey/commit/bc658ddc64ff337dd6e3a480eae06646360f2e4f))
+- **refine:** improve structured formatting and multiline injection ([466f219](https://github.com/BuildWithAIs/voicekey/commit/466f219d9046264caf6a5f3cfb5686d038782907))
+- simplify refine base url config ([881ae4e](https://github.com/BuildWithAIs/voicekey/commit/881ae4e89b50c35d043e3e050e54de0f3f2cfa0c))
+
 ### [0.1.11](https://github.com/BuildWithAIs/voicekey/compare/v0.1.10...v0.1.11) (2026-03-29)
 
 ### Features
