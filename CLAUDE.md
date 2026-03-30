@@ -166,7 +166,7 @@ npm run type-check    # Run TypeScript compiler type checking (no emit)
 npm run quality       # Run lint + format:check + type-check (all checks)
 ```
 
-### Single Test/File Commands
+### Single File Commands
 
 ```bash
 # Lint specific file/directory
@@ -229,4 +229,4 @@ npm run tsc --noEmit src/App.tsx
 >
 > 1. **Force UTF-8**: Always use UTF-8 for files and I/O.
 > 2. **Console Output**: Ensure terminals/logs correctly display Chinese characters (avoid GBK mismatches).
-> 3. **Paths**: Test file operations with Chinese paths.
+> 3. **Paths**: Verify file operations with Chinese paths.

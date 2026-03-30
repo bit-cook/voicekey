@@ -1,6 +1,6 @@
 # components/
 
-React 组件目录，包含应用级组件与 UI 组件库。
+React 组件目录，包含应用级组件与 `ui/` 组件库。
 
 ## 子目录
 
@@ -16,9 +16,9 @@ React 组件目录，包含应用级组件与 UI 组件库。
 
 - 监听主进程的录音开始/停止事件。
 - 在单次会话内保持同一条 `MediaStream` 与 `AudioContext`。
-- 每 29 秒轮转一次 `MediaRecorder` 并发送独立音频 chunk。
+- 每 29 秒轮转一次 `MediaRecorder` 并发送独立音频 `chunk`。
 - 在 3 分钟上限时自动请求停止会话。
-- 向主进程同步音频电平与录音错误。
+- 向主进程同步音量电平与录音错误。
 
 ### `HUD.tsx`
 
@@ -39,8 +39,3 @@ React 组件目录，包含应用级组件与 UI 组件库。
 ### `InteractiveCharts.tsx`
 
 首页趋势图组件，聚合历史记录并绘制字符识别趋势。
-
-## 测试
-
-- `__tests__/AudioRecorder.test.tsx` - 录音 chunk 轮转与 3 分钟自动停录。
-- `__tests__/InteractiveCharts.test.tsx` - 趋势图与本地化渲染。

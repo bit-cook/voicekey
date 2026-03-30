@@ -4,8 +4,8 @@
  * 负责处理以下 IPC 通道：
  * - CONFIG_GET: 获取全部配置
  * - CONFIG_SET: 设置配置（支持 app/asr/llmRefine/hotkey 部分更新）
- * - CONFIG_TEST: 测试 ASR 连接
- * - CONFIG_REFINE_TEST: 测试文本润色连接
+ * - CONFIG_TEST: 校验 ASR 连接
+ * - CONFIG_REFINE_TEST: 校验文本润色连接
  *
  * @module electron/main/ipc/config-handlers
  */
@@ -110,7 +110,7 @@ export function registerConfigHandlers(): void {
     },
   )
 
-  // CONFIG_TEST: 测试 ASR 连接
+  // CONFIG_TEST: 校验 ASR 连接
   ipcMain.handle(IPC_CHANNELS.CONFIG_TEST, async (_event, config?: ASRConfig) => {
     if (config) {
       const tempProvider = new ASRProvider(config)

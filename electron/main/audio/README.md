@@ -8,7 +8,6 @@ Main-process audio pipeline for recording sessions and chunked transcription.
 - `session-manager.ts` - Owns the active recording session lifecycle, `sessionId`, and HUD state transitions.
 - `processor.ts` - Accepts audio chunks, writes temp files, converts to MP3, calls GLM ASR, merges chunk text in order, logs final line-break metadata, and runs the final refine/history/inject step once.
 - `converter.ts` - Initializes FFmpeg and converts captured audio to the upload format, with optional low-volume gain.
-- `__tests__/` - Coverage for session lifecycle, chunk processing, and conversion helpers.
 
 ## Current Flow
 
